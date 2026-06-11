@@ -4,6 +4,7 @@ package tun
 
 import (
 	"net/netip"
+	"slices"
 	"sync"
 
 	"github.com/sagernet/gvisor/pkg/buffer"
@@ -19,6 +20,8 @@ type LinkEndpointFilter struct {
 	Dispatcher           *ForwardDispatcher
 	Inet4Address         netip.Addr
 	Inet6Address         netip.Addr
+	Inet4LocalAddresses  []netip.Addr
+	Inet6LocalAddresses  []netip.Addr
 	Inet4LoopbackAddress []netip.Addr
 	Inet6LoopbackAddress []netip.Addr
 }
@@ -34,6 +37,8 @@ func (w *LinkEndpointFilter) Attach(dispatcher stack.NetworkDispatcher) {
 		writer:               w.Writer,
 		inet4Address:         w.Inet4Address,
 		inet6Address:         w.Inet6Address,
+		inet4LocalAddresses:  w.Inet4LocalAddresses,
+		inet6LocalAddresses:  w.Inet6LocalAddresses,
 		inet4LoopbackAddress: w.Inet4LoopbackAddress,
 		inet6LoopbackAddress: w.Inet6LoopbackAddress,
 	}
@@ -49,6 +54,8 @@ type networkDispatcherFilter struct {
 	dispatchStage        *ForwardStage
 	inet4Address         netip.Addr
 	inet6Address         netip.Addr
+	inet4LocalAddresses  []netip.Addr
+	inet6LocalAddresses  []netip.Addr
 	inet4LoopbackAddress []netip.Addr
 	inet6LoopbackAddress []netip.Addr
 }
@@ -117,7 +124,7 @@ func (w *networkDispatcherFilter) dispatch(protocol tcpip.NetworkProtocolNumber,
 				}
 			}
 		case header.ICMPv4ProtocolNumber:
-			if destination == w.inet4Address {
+			if destination == w.inet4Address || slices.Contains(w.inet4LocalAddresses, destination) {
 				return false
 			}
 		}
@@ -130,7 +137,7 @@ func (w *networkDispatcherFilter) dispatch(protocol tcpip.NetworkProtocolNumber,
 				}
 			}
 		case header.ICMPv6ProtocolNumber:
-			if destination == w.inet6Address {
+			if destination == w.inet6Address || slices.Contains(w.inet6LocalAddresses, destination) {
 				return false
 			}
 		}

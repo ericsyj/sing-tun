@@ -16,15 +16,18 @@ import (
 	"github.com/sagernet/gvisor/pkg/tcpip/network/ipv4"
 	"github.com/sagernet/gvisor/pkg/tcpip/network/ipv6"
 	"github.com/sagernet/gvisor/pkg/tcpip/stack"
+	"github.com/sagernet/sing/common"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/logger"
 )
 
 type ICMPForwarder struct {
-	stack      *stack.Stack
-	handler    Handler
-	dispatcher *ForwardDispatcher
-	logger     logger.Logger
+	stack          *stack.Stack
+	handler        Handler
+	dispatcher     *ForwardDispatcher
+	logger         logger.Logger
+	inet4Addresses []netip.Addr
+	inet6Addresses []netip.Addr
 
 	returnPath icmpForwarderReturn
 
@@ -83,6 +86,11 @@ func (f *ICMPForwarder) Purge() {
 	f.flowAccess.Unlock()
 }
 
+func (f *ICMPForwarder) SetLocalAddresses(inet4Addresses, inet6Addresses []netip.Addr) {
+	f.inet4Addresses = inet4Addresses
+	f.inet6Addresses = inet6Addresses
+}
+
 func (f *ICMPForwarder) Close() error {
 	f.returnPath.closed.Store(true)
 	f.flowAccess.Lock()
@@ -111,21 +119,23 @@ func (f *ICMPForwarder) HandlePacket(id stack.TransportEndpointID, pkt *stack.Pa
 			destination: AddrFromAddress(ipHdr.DestinationAddress()),
 			identifier:  identifier,
 		}
-		if f.forwardCached(key, pkt) {
-			return true
-		}
-		source := netip.AddrPortFrom(key.source, identifier)
-		destination := netip.AddrPortFrom(key.destination, identifier)
-		verdict, loaded := f.dispatcher.acceptedVerdict(uint8(header.ICMPv4ProtocolNumber), source, destination)
-		if !loaded {
-			verdict = f.handler.JudgeFlow(uint8(header.ICMPv4ProtocolNumber), source, destination, nil)
-		}
-		switch verdict.Action {
-		case ActionReject, ActionDrop:
-			return true
-		case ActionFlow, ActionBypass:
-			if f.installFlow(key, verdict, pkt) {
+		if !common.Contains(f.inet4Addresses, key.destination) {
+			if f.forwardCached(key, pkt) {
 				return true
+			}
+			source := netip.AddrPortFrom(key.source, identifier)
+			destination := netip.AddrPortFrom(key.destination, identifier)
+			verdict, loaded := f.dispatcher.acceptedVerdict(uint8(header.ICMPv4ProtocolNumber), source, destination)
+			if !loaded {
+				verdict = f.handler.JudgeFlow(uint8(header.ICMPv4ProtocolNumber), source, destination, nil)
+			}
+			switch verdict.Action {
+			case ActionReject, ActionDrop:
+				return true
+			case ActionFlow, ActionBypass:
+				if f.installFlow(key, verdict, pkt) {
+					return true
+				}
 			}
 		}
 		icmpHdr.SetType(header.ICMPv4EchoReply)
@@ -173,21 +183,23 @@ func (f *ICMPForwarder) HandlePacket(id stack.TransportEndpointID, pkt *stack.Pa
 			destination: AddrFromAddress(ipHdr.DestinationAddress()),
 			identifier:  identifier,
 		}
-		if f.forwardCached(key, pkt) {
-			return true
-		}
-		source := netip.AddrPortFrom(key.source, identifier)
-		destination := netip.AddrPortFrom(key.destination, identifier)
-		verdict, loaded := f.dispatcher.acceptedVerdict(uint8(header.ICMPv6ProtocolNumber), source, destination)
-		if !loaded {
-			verdict = f.handler.JudgeFlow(uint8(header.ICMPv6ProtocolNumber), source, destination, nil)
-		}
-		switch verdict.Action {
-		case ActionReject, ActionDrop:
-			return true
-		case ActionFlow, ActionBypass:
-			if f.installFlow(key, verdict, pkt) {
+		if !common.Contains(f.inet6Addresses, key.destination) {
+			if f.forwardCached(key, pkt) {
 				return true
+			}
+			source := netip.AddrPortFrom(key.source, identifier)
+			destination := netip.AddrPortFrom(key.destination, identifier)
+			verdict, loaded := f.dispatcher.acceptedVerdict(uint8(header.ICMPv6ProtocolNumber), source, destination)
+			if !loaded {
+				verdict = f.handler.JudgeFlow(uint8(header.ICMPv6ProtocolNumber), source, destination, nil)
+			}
+			switch verdict.Action {
+			case ActionReject, ActionDrop:
+				return true
+			case ActionFlow, ActionBypass:
+				if f.installFlow(key, verdict, pkt) {
+					return true
+				}
 			}
 		}
 		icmpHdr.SetType(header.ICMPv6EchoReply)

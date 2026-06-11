@@ -33,6 +33,8 @@ type GVisor struct {
 	tun                  GVisorTun
 	inet4Address         netip.Addr
 	inet6Address         netip.Addr
+	inet4LocalAddresses  []netip.Addr
+	inet6LocalAddresses  []netip.Addr
 	inet4LoopbackAddress []netip.Addr
 	inet6LoopbackAddress []netip.Addr
 	icmpTimeout          time.Duration
@@ -71,12 +73,15 @@ func NewGVisor(
 	if len(options.TunOptions.Inet6Address) > 0 {
 		inet6Address = options.TunOptions.Inet6Address[0].Addr()
 	}
+	inet4LocalAddresses, inet6LocalAddresses := localICMPAddresses(options.TunOptions)
 
 	gStack := &GVisor{
 		ctx:                  options.Context,
 		tun:                  gTun,
 		inet4Address:         inet4Address,
 		inet6Address:         inet6Address,
+		inet4LocalAddresses:  inet4LocalAddresses,
+		inet6LocalAddresses:  inet6LocalAddresses,
 		inet4LoopbackAddress: options.TunOptions.Inet4LoopbackAddress,
 		inet6LoopbackAddress: options.TunOptions.Inet6LoopbackAddress,
 		icmpTimeout:          options.ICMPTimeout,
@@ -109,6 +114,8 @@ func (t *GVisor) Start() error {
 		Dispatcher:           t.dispatcher,
 		Inet4Address:         t.inet4Address,
 		Inet6Address:         t.inet6Address,
+		Inet4LocalAddresses:  t.inet4LocalAddresses,
+		Inet6LocalAddresses:  t.inet6LocalAddresses,
 		Inet4LoopbackAddress: t.inet4LoopbackAddress,
 		Inet6LoopbackAddress: t.inet6LoopbackAddress,
 	}
@@ -125,6 +132,7 @@ func (t *GVisor) Start() error {
 	ipStack.SetTransportProtocolHandler(udp.ProtocolNumber, udpForwarder.HandlePacket)
 	t.udpForwarder = udpForwarder
 	icmpForwarder := NewICMPForwarder(ipStack, t.handler, t.dispatcher, t.logger)
+	icmpForwarder.SetLocalAddresses(t.inet4LocalAddresses, t.inet6LocalAddresses)
 	ipStack.SetTransportProtocolHandler(icmp.ProtocolNumber4, icmpForwarder.HandlePacket)
 	ipStack.SetTransportProtocolHandler(icmp.ProtocolNumber6, icmpForwarder.HandlePacket)
 	t.icmpForwarder = icmpForwarder

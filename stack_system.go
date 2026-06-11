@@ -40,6 +40,8 @@ type System struct {
 	inet6Address         netip.Addr
 	inet6NextAddress     netip.Addr
 	broadcastAddr        netip.Addr
+	inet4LocalAddresses  []netip.Addr
+	inet6LocalAddresses  []netip.Addr
 	inet4LoopbackAddress []netip.Addr
 	inet6LoopbackAddress []netip.Addr
 	udpTimeout           time.Duration
@@ -70,12 +72,15 @@ type Session struct {
 }
 
 func NewSystem(options StackOptions) (Stack, error) {
+	inet4LocalAddresses, inet6LocalAddresses := localICMPAddresses(options.TunOptions)
 	stack := &System{
 		ctx:                  options.Context,
 		tun:                  options.Tun,
 		tunName:              options.TunOptions.Name,
 		netNs:                options.TunOptions.NetNs,
 		mtu:                  int(options.TunOptions.MTU),
+		inet4LocalAddresses:  inet4LocalAddresses,
+		inet6LocalAddresses:  inet6LocalAddresses,
 		inet4LoopbackAddress: options.TunOptions.Inet4LoopbackAddress,
 		inet6LoopbackAddress: options.TunOptions.Inet6LoopbackAddress,
 		udpTimeout:           options.UDPTimeout,
@@ -449,7 +454,7 @@ func (s *System) dispatchIPv4(ipHdr header.IPv4, destination netip.Addr) bool {
 			return false
 		}
 	case header.ICMPv4ProtocolNumber:
-		if destination == s.inet4Address {
+		if slices.Contains(s.inet4LocalAddresses, destination) {
 			return false
 		}
 	}
@@ -468,7 +473,7 @@ func (s *System) dispatchIPv6(ipHdr header.IPv6, destination netip.Addr) bool {
 			return false
 		}
 	case header.ICMPv6ProtocolNumber:
-		if destination == s.inet6Address {
+		if slices.Contains(s.inet6LocalAddresses, destination) {
 			return false
 		}
 	}

@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"runtime"
 	"slices"
 	"sync"
 	"syscall"
@@ -163,7 +164,25 @@ func (s *System) start() error {
 	}
 	var tcpListener net.Listener
 	var err error
-	if s.inet4NextAddress.IsValid() {
+	if runtime.GOOS == "android" {
+		tcpListener, err = listener.Listen(s.ctx, "tcp", net.JoinHostPort(net.IPv6unspecified.String(), "0"))
+		if err != nil {
+			return err
+		}
+		// Android tears down listeners bound to a VPN interface address when
+		// switching users. A dual-stack wildcard listener is independent of
+		// that address, so both rewritten IP families share this port.
+		s.tcpListener = tcpListener
+		s.tcpPort = M.SocksaddrFromNet(tcpListener.Addr()).Port
+		s.tcpPort6 = s.tcpPort
+		if s.inet4NextAddress.IsValid() {
+			s.tcpNat4 = NewNat(s.ctx, s.udpTimeout)
+		}
+		if s.inet6NextAddress.IsValid() {
+			s.tcpNat6 = NewNat(s.ctx, s.udpTimeout)
+		}
+		go s.acceptLoop(tcpListener)
+	} else if s.inet4NextAddress.IsValid() {
 		for range 3 {
 			tcpListener, err = listenNetworkNamespace(s.ctx, s.netNs, listener, "tcp4", net.JoinHostPort(s.inet4Address.String(), "0"))
 			if !retryableListenError(err) {
@@ -177,9 +196,9 @@ func (s *System) start() error {
 		s.tcpListener = tcpListener
 		s.tcpPort = M.SocksaddrFromNet(tcpListener.Addr()).Port
 		s.tcpNat4 = NewNat(s.ctx, s.udpTimeout)
-		go s.acceptLoop(tcpListener, s.tcpNat4)
+		go s.acceptLoop(tcpListener)
 	}
-	if s.inet6NextAddress.IsValid() {
+	if runtime.GOOS != "android" && s.inet6NextAddress.IsValid() {
 		for range 3 {
 			tcpListener, err = listenNetworkNamespace(s.ctx, s.netNs, listener, "tcp6", net.JoinHostPort(s.inet6Address.String(), "0"))
 			if !retryableListenError(err) {
@@ -193,7 +212,7 @@ func (s *System) start() error {
 		s.tcpListener6 = tcpListener
 		s.tcpPort6 = M.SocksaddrFromNet(tcpListener.Addr()).Port
 		s.tcpNat6 = NewNat(s.ctx, s.udpTimeout)
-		go s.acceptLoop(tcpListener, s.tcpNat6)
+		go s.acceptLoop(tcpListener)
 	}
 	udpNATOptions := s.udpNATOptions
 	udpNATOptions.Handler = s.handler
@@ -425,16 +444,33 @@ func (s *System) processPacket(packet []byte) bool {
 	return writeBack
 }
 
-func (s *System) acceptLoop(listener net.Listener, tcpNat *TCPNat) {
+func (s *System) isTCPSourceAddress(address netip.Addr) bool {
+	address = address.Unmap()
+	return address == s.inet4NextAddress || address == s.inet6NextAddress
+}
+
+func (s *System) acceptLoop(listener net.Listener) {
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
 			return
 		}
-		connPort := M.SocksaddrFromNet(conn.RemoteAddr()).Port
-		session := tcpNat.LookupBack(connPort, 0)
+		remoteAddr := M.SocksaddrFromNet(conn.RemoteAddr()).Unwrap()
+		if !s.isTCPSourceAddress(remoteAddr.Addr) {
+			s.logger.Trace(E.New("unknown source address: ", remoteAddr.Addr))
+			_ = conn.Close()
+			continue
+		}
+		var tcpNat *TCPNat
+		if remoteAddr.Addr == s.inet4NextAddress {
+			tcpNat = s.tcpNat4
+		} else {
+			tcpNat = s.tcpNat6
+		}
+		session := tcpNat.LookupBack(remoteAddr.Port, 0)
 		if session == nil {
-			s.logger.Trace(E.New("unknown session with port ", connPort))
+			s.logger.Trace(E.New("unknown session with port ", remoteAddr.Port))
+			_ = conn.Close()
 			continue
 		}
 		go s.handler.NewConnectionEx(s.ctx, conn, M.SocksaddrFromNetIP(session.Source), M.SocksaddrFromNetIP(session.Destination), nil)

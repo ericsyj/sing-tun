@@ -126,6 +126,12 @@ func (s *RedirectServer) loopIn() {
 				s.logger.Error("process redirect connection from ", source, ": invalid connection: ", err)
 				continue
 			}
+			if isDirectRedirectConnection(conn.LocalAddr(), originalDestination) {
+				_ = conn.SetLinger(0)
+				_ = conn.Close()
+				s.logger.Warn("reject direct connection to redirect listener from ", source)
+				continue
+			}
 			destination = M.SocksaddrFromNetIP(originalDestination).Unwrap()
 		}
 		go s.handler.NewConnectionEx(s.ctx, conn, source, destination, nil)

@@ -186,6 +186,11 @@ type flowJudgement struct {
 	verdict FlowVerdict
 }
 
+type exhaustedJudgement struct {
+	judgement *flowJudgement
+	next      int
+}
+
 type ForwardStage struct {
 	dispatcher *ForwardDispatcher
 	writeback  ForwardWriteback
@@ -390,7 +395,10 @@ func (s *ForwardStage) judge(judgement *flowJudgement, firstPacket []byte) {
 }
 
 func (s *ForwardStage) ResumeJudged(process func(packet []byte, meta ForwardFrameMeta)) {
-	var unhandled []heldPacket
+	var (
+		unhandled []heldPacket
+		exhausted []exhaustedJudgement
+	)
 	s.access.Lock()
 	if s.dispatcher.closed.Load() {
 		s.access.Unlock()
@@ -398,23 +406,59 @@ func (s *ForwardStage) ResumeJudged(process func(packet []byte, meta ForwardFram
 	}
 	now := s.dispatcher.now()
 	for _, judgement := range s.judged {
-		delete(s.judging, judgement.key)
-		s.held -= len(judgement.packets)
-		for index := range judgement.packets {
-			held := &judgement.packets[index]
-			parsed, _ := parseForwardPacket(held.packet)
-			parsed.transport = parsed.transport[:held.transportLength]
-			if !s.install(judgement.key, &parsed, held.packet, &held.meta, judgement.verdict, now) {
-				unhandled = append(unhandled, *held)
-			}
+		next, done := s.installJudged(judgement, 0, now, true, &unhandled)
+		if !done {
+			// Keep the judgement registered so later packets of this flow stay held
+			// until the selector allocation is retried.
+			exhausted = append(exhausted, exhaustedJudgement{judgement: judgement, next: next})
 		}
 	}
 	clear(s.judged)
 	s.judged = s.judged[:0]
 	s.access.Unlock()
+	if len(exhausted) > 0 {
+		var reclaimed []Port
+		for _, pending := range exhausted {
+			port := pending.judgement.verdict.Port
+			if !slices.Contains(reclaimed, port) {
+				reclaimed = append(reclaimed, port)
+				// Do not hold a stage lock while collecting entries owned by other queues.
+				s.dispatcher.reclaimNAT(port)
+			}
+		}
+		s.access.Lock()
+		if !s.dispatcher.closed.Load() {
+			now = s.dispatcher.now()
+			for _, pending := range exhausted {
+				// A reset may have dropped the judgement while the stage was unlocked.
+				if s.judging[pending.judgement.key] == pending.judgement {
+					s.installJudged(pending.judgement, pending.next, now, false, &unhandled)
+				}
+			}
+		}
+		s.access.Unlock()
+	}
 	for _, held := range unhandled {
 		process(held.packet, held.meta)
 	}
+}
+
+func (s *ForwardStage) installJudged(judgement *flowJudgement, next int, now int64, retry bool, unhandled *[]heldPacket) (int, bool) {
+	for ; next < len(judgement.packets); next++ {
+		held := &judgement.packets[next]
+		parsed, _ := parseForwardPacket(held.packet)
+		parsed.transport = parsed.transport[:held.transportLength]
+		handled, exhausted := s.install(judgement.key, &parsed, held.packet, &held.meta, judgement.verdict, now, retry)
+		if exhausted {
+			return next, false
+		}
+		if !handled {
+			*unhandled = append(*unhandled, *held)
+		}
+	}
+	delete(s.judging, judgement.key)
+	s.held -= len(judgement.packets)
+	return next, true
 }
 
 func (s *ForwardStage) teardownFlow(key flowKey, reason FlowCloseReason) {
@@ -478,7 +522,7 @@ func (s *ForwardStage) handleHit(entry *flowEntry, packet *forwardPacket, raw []
 	}
 }
 
-func (s *ForwardStage) install(key flowKey, packet *forwardPacket, raw []byte, meta *ForwardFrameMeta, verdict FlowVerdict, now int64) bool {
+func (s *ForwardStage) install(key flowKey, packet *forwardPacket, raw []byte, meta *ForwardFrameMeta, verdict FlowVerdict, now int64, retry bool) (handled bool, exhausted bool) {
 	d := s.dispatcher
 	existing, loaded := s.table[key]
 	if loaded {
@@ -489,7 +533,7 @@ func (s *ForwardStage) install(key flowKey, packet *forwardPacket, raw []byte, m
 			if remove {
 				s.removeEntry(key, existing, FlowCloseReset)
 			}
-			return handled
+			return handled, false
 		}
 	}
 	switch verdict.Action {
@@ -501,37 +545,40 @@ func (s *ForwardStage) install(key flowKey, packet *forwardPacket, raw []byte, m
 				entry.deadline = now + int64(entry.idle)
 				s.insertEntry(key, entry, now)
 				s.forwardToPort(flow, packet, raw, meta)
-				return true
+				return true, false
 			}
 			if result == createFlowExhausted {
+				if retry {
+					return false, true
+				}
 				if now-s.exhaustedLogAt >= int64(exhaustedLogInterval) {
 					s.exhaustedLogAt = now
 					d.logger.Warn("port selector range exhausted, rejecting flow to ", packet.destination)
 				}
-				s.installSimple(key, ActionReject, packet.protocol, now)
+				// Capacity can return before the next SYN; do not cache a route rejection.
 				s.stageReject(packet, raw, meta)
-				return true
+				return true, false
 			}
 		}
 		s.installAccept(key, packet, verdict, now)
-		return false
+		return false, false
 	case ActionReject:
 		s.installSimple(key, ActionReject, packet.protocol, now)
 		s.stageReject(packet, raw, meta)
-		return true
+		return true, false
 	case ActionDrop:
 		s.installSimple(key, ActionDrop, packet.protocol, now)
-		return true
+		return true, false
 	case ActionHijackDNS:
 		if packet.protocol == uint8(header.UDPProtocolNumber) {
 			d.hijackDNSPacket(packet)
-			return true
+			return true, false
 		}
 		s.installAccept(key, packet, verdict, now)
-		return false
+		return false, false
 	default:
 		s.installAccept(key, packet, verdict, now)
-		return false
+		return false, false
 	}
 }
 
@@ -1033,6 +1080,35 @@ func (s *ForwardStage) removeEntry(key flowKey, entry *flowEntry, reason FlowClo
 		}
 		entry.flow.close(reason)
 		entry.flow.nat.release(entry.flow)
+	}
+}
+
+// reclaimNAT is used only after allocation failed. Preserve live mappings and
+// forward tombstones, but release closed or expired reverse mappings so that
+// a busy queue does not have to wait for every other queue's periodic sweep.
+func (d *ForwardDispatcher) reclaimNAT(port Port) {
+	d.stagesAccess.Lock()
+	stages := d.stages
+	d.stagesAccess.Unlock()
+	for _, stage := range stages {
+		stage.access.Lock()
+		now := d.now()
+		for key, entry := range stage.table {
+			flow := entry.flow
+			if flow == nil || flow.nat.port != port {
+				continue
+			}
+			if entryExpired(entry, now) {
+				stage.removeEntry(key, entry, FlowCloseTimeout)
+			} else if flow.closed.Load() {
+				if entry.action == ActionFlow {
+					tombstoneEntry(entry, now)
+				}
+				flow.nat.release(flow)
+				entry.flow = nil
+			}
+		}
+		stage.access.Unlock()
 	}
 }
 

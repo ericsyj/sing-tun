@@ -146,7 +146,7 @@ func (n *TCPNat) Lookup(source netip.AddrPort, destination netip.AddrPort, flags
 	}
 	n.portAccess.Lock()
 	defer n.portAccess.Unlock()
-	nextPort, ok := n.allocatePortLocked()
+	nextPort, ok := n.allocatePortLocked(time.Now())
 	if !ok {
 		return 0
 	}
@@ -169,7 +169,15 @@ func (n *TCPNat) observe(port uint16, flags header.TCPFlags) bool {
 	return session != nil && session.observe(flags, false)
 }
 
-func (n *TCPNat) allocatePortLocked() (uint16, bool) {
+func (n *TCPNat) allocatePortLocked(now time.Time) (uint16, bool) {
+	var (
+		closedPort    uint16
+		closedSession *TCPSession
+		closedAt      time.Time
+	)
+	// Prefer an unused or expired port. A closed port is only reclaimed after
+	// the entire selector space has been exhausted, preserving its closing
+	// grace period for delayed packets.
 	for range 65535 - 10000 + 1 {
 		nextPort := n.portIndex
 		if nextPort == 0 {
@@ -178,9 +186,31 @@ func (n *TCPNat) allocatePortLocked() (uint16, bool) {
 		} else {
 			n.portIndex++
 		}
-		if _, occupied := n.portMap[nextPort]; !occupied {
+		session, occupied := n.portMap[nextPort]
+		if !occupied {
+			return nextPort, true
+		}
+		session.Lock()
+		expired := n.expiredLocked(session, now)
+		if !expired && session.closed && (closedSession == nil || session.LastActive.Before(closedAt)) {
+			closedPort = nextPort
+			closedSession = session
+			closedAt = session.LastActive
+		}
+		session.Unlock()
+		if expired {
+			n.removeSessionLocked(nextPort, session)
 			return nextPort, true
 		}
 	}
+	if closedSession != nil {
+		n.removeSessionLocked(closedPort, closedSession)
+		return closedPort, true
+	}
 	return 0, false
+}
+
+func (n *TCPNat) removeSessionLocked(port uint16, session *TCPSession) {
+	delete(n.addrMap, tcpNatKey{Source: session.Source, Destination: session.Destination})
+	delete(n.portMap, port)
 }

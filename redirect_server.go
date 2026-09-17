@@ -71,9 +71,16 @@ func (s *RedirectServer) Start() error {
 	if err != nil {
 		return err
 	}
-	s.listener = listener.(*net.TCPListener)
-	go s.loopIn()
+	s.StartWithListener(listener.(*net.TCPListener))
 	return nil
+}
+
+// StartWithListener takes ownership of an already listening TCP socket. This lets
+// a privileged process create the socket without moving connection handling out
+// of the process running the redirect server.
+func (s *RedirectServer) StartWithListener(listener *net.TCPListener) {
+	s.listener = listener
+	go s.loopIn()
 }
 
 func (s *RedirectServer) Port() uint16 {
@@ -113,6 +120,8 @@ func (s *RedirectServer) loopIn() {
 			return
 		}
 		retryDelay = 0
+		// FileListener cannot preserve the ListenConfig across an FD handoff.
+		_ = conn.SetKeepAliveConfig(net.KeepAliveConfig{Enable: true, Idle: 10 * time.Minute})
 		source := M.SocksaddrFromNet(conn.RemoteAddr()).Unwrap()
 		var destination M.Socksaddr
 		if s.transparent && !source.IsIPv4() {

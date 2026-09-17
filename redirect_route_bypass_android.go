@@ -152,57 +152,7 @@ func (r *autoRedirect) reconcileBypassRoutesLocked(family int, desired []netlink
 	if err != nil {
 		return 0, E.Cause(err, "list bypass routes")
 	}
-	desiredByDestination := make(map[string]*netlink.Route, len(desired))
-	for index := range desired {
-		desiredByDestination[desired[index].Dst.String()] = &desired[index]
-	}
-	matched := make(map[string]bool, len(desired))
-	var changed int
-	for index := range current {
-		currentRoute := &current[index]
-		if currentRoute.Dst == nil {
-			currentRoute.Dst = defaultDestination(family)
-		}
-		destination := currentRoute.Dst.String()
-		desiredRoute, exists := desiredByDestination[destination]
-		if exists && bypassRouteEquals(currentRoute, desiredRoute) {
-			matched[destination] = true
-			continue
-		}
-		// RouteReplace only overwrites a route with the same metric; a
-		// current route with another metric would survive alongside it.
-		if !exists || currentRoute.Priority != desiredRoute.Priority {
-			_ = netlink.RouteDel(currentRoute)
-			changed++
-		}
-	}
-	for index := range desired {
-		desiredRoute := &desired[index]
-		if matched[desiredRoute.Dst.String()] {
-			continue
-		}
-		err = netlink.RouteReplace(desiredRoute)
-		if err != nil {
-			return changed, E.Cause(err, "add bypass route ", desiredRoute.Dst)
-		}
-		changed++
-	}
-	return changed, nil
-}
-
-func bypassRouteEquals(left *netlink.Route, right *netlink.Route) bool {
-	return left.LinkIndex == right.LinkIndex &&
-		left.Scope == right.Scope &&
-		left.Priority == right.Priority &&
-		left.Gw.Equal(right.Gw) &&
-		routeSourceEquals(left.Src, right.Src)
-}
-
-func routeSourceEquals(left *net.IPNet, right *net.IPNet) bool {
-	if left == nil || right == nil {
-		return left == right
-	}
-	return left.IP.Equal(right.IP) && slices.Equal(left.Mask, right.Mask)
+	return reconcileBypassRoutes(family, current, desired, netlink.RouteDel, netlink.RouteReplace)
 }
 
 func (r *autoRedirect) bypassRouteRule(family int) *netlink.Rule {
@@ -219,11 +169,7 @@ func (r *autoRedirect) bypassRouteRule(family int) *netlink.Rule {
 
 func (r *autoRedirect) bypassRouteSources(family int, ruleList []netlink.Rule) []netlink.Route {
 	tables := discoverAndroidVPNServiceTables(ruleList, r.tunOptions.Name)
-	var sourceTables []int
-	if tables.localNetwork > 0 {
-		sourceTables = append(sourceTables, tables.localNetwork)
-	}
-	sourceTables = append(sourceTables, tables.physical...)
+	sourceTables := slices.Concat(tables.localNetworks, tables.physical)
 	var specificRoutes []netlink.Route
 	var defaultRoutes []netlink.Route
 	for _, sourceTable := range sourceTables {

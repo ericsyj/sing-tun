@@ -265,6 +265,14 @@ func (r *autoRedirect) initializeBackend() error {
 	return nil
 }
 
+// isRedirectLocalAddress reports whether traffic to an interface address is
+// delivered to this host without interception. IPv6 link-local addresses are
+// meaningless to an outbound without their zone, which the redirect server
+// never sees.
+func isRedirectLocalAddress(interfaceName string, address netip.Addr) bool {
+	return interfaceName == "lo" || address.IsGlobalUnicast() || address.Is6() && address.IsLinkLocalUnicast()
+}
+
 func (r *autoRedirect) tproxyEnabled() bool {
 	return !r.useNFTables && r.enableIPv6 && (!r.androidVPNService || r.customRedirectTransparent)
 }
@@ -434,10 +442,12 @@ func (r *autoRedirect) redirectPort() uint16 {
 // netd (server/RouteController.cpp) identifies a network's route table as
 // ifindex + ROUTE_TABLE_OFFSET_FROM_INDEX, selects VPN traffic with the
 // secure (fwmark 0x0/0x20000) and bypassable (fwmark 0x0/0x30000) uid range
-// rules, the local network with a rule matching fwmark 0x0/0x10000, and the
-// default network with a rule matching fwmark 0x0/0xffff without a uid range.
+// rules, local networks with rules at RULE_PRIORITY_LOCAL_NETWORK matching
+// fwmark 0x0/0x10000, and the default network with a rule matching fwmark
+// 0x0/0xffff without a uid range.
 const (
 	androidRouteTableOffsetFromIndex = 1000
+	androidLocalNetworkRulePriority  = 20000
 	androidExplicitSelectMask        = 0x10000
 	androidSecureVPNMask             = 0x20000
 	androidBypassableVPNMask         = 0x30000

@@ -210,7 +210,7 @@ func (r *autoRedirect) findLocalAddresses() ([]netip.Prefix, error) {
 	}
 	return common.Uniq(common.FlatMap(r.interfaceFinder.Interfaces(), func(it control.Interface) []netip.Prefix {
 		return common.Map(common.Filter(it.Addresses, func(prefix netip.Prefix) bool {
-			return it.Name == "lo" || prefix.Addr().IsGlobalUnicast()
+			return isRedirectLocalAddress(it.Name, prefix.Addr())
 		}), netip.Prefix.Masked)
 	})), nil
 }
@@ -590,8 +590,11 @@ func (r *autoRedirect) setupIPTablesForFamily(family *iptablesFamily) error {
 		inserts = append(inserts, iptablesInsert{iptablesTableNAT, "PREROUTING", []string{"-j", preroutingNAT.name}})
 		if r.androidVPNService {
 			postroutingNAT := r.iptablesChain(family, iptablesTableNAT, r.tableName+"-postrouting")
+			// Cellular QoS rules can overwrite the packet mark in mangle
+			// POSTROUTING before source NAT. Pre-match saves the bypass decision
+			// in the connection mark, which survives those packet mark changes.
 			for _, prefix := range options.Inet4Address {
-				postroutingNAT.add("-s", prefix.Masked().String(), "!", "-o", options.Name, "-m", "mark", "--mark", outputMark, "-j", "MASQUERADE")
+				postroutingNAT.add("-s", prefix.Masked().String(), "!", "-o", options.Name, "-m", "connmark", "--mark", outputMark, "-j", "MASQUERADE")
 			}
 			if postroutingNAT.err != nil {
 				return postroutingNAT.err
@@ -657,6 +660,9 @@ func (r *autoRedirect) setupIPTablesForFamily(family *iptablesFamily) error {
 			"-m", "connmark", "--mark", tproxyMark,
 			"-m", "conntrack", "--ctdir", "ORIGINAL",
 		}, tproxyAction)...)
+		// TPROXY drops a packet whose socket lookup finds a non-transparent socket,
+		// which is every reply to a connection made by a local socket.
+		preroutingTProxy.add("-m", "conntrack", "--ctdir", "REPLY", "-j", "RETURN")
 		r.iptablesAddExcludeRules(preroutingTProxy, iptablesHookPrerouting, iptablesKindNAT, dnsHijack)
 		preroutingTProxy.add("-j", "CONNMARK", "--set-xmark", tproxyMark)
 		preroutingTProxy.add(tproxyAction...)

@@ -45,7 +45,7 @@ func (*selectorTestWriteback) ReturnHeadroom() int { return 0 }
 func selectorTestDispatcher(t *testing.T, count uint16) (*ForwardDispatcher, *selectorTestPort) {
 	t.Helper()
 	port := &selectorTestPort{count: count}
-	d := NewForwardDispatcher(&selectorTestHandler{port: port}, &selectorTestWriteback{}, logger.NOP(), UDPNatOptions{Timeout: time.Minute}, time.Minute)
+	d := NewForwardDispatcher(&selectorTestHandler{port: port}, &selectorTestWriteback{}, logger.NOP(), 0, UDPNatOptions{Timeout: time.Minute}, time.Minute)
 	t.Cleanup(d.Close)
 	return d, port
 }
@@ -226,7 +226,7 @@ func TestForwardNATReclaimSharedSelector(t *testing.T) {
 			for _, state := range []string{"closed", "aborted", "expired"} {
 				t.Run(netip.MustParseAddrPort(source).String()+"/"+strconv.Itoa(int(protocol))+"/"+state, func(t *testing.T) {
 					port := &reservationTestPort{selectorTestPort: selectorTestPort{count: 1}, reserved: make(map[netip.AddrPort]bool)}
-					d := NewForwardDispatcher(&selectorTestHandler{port: port}, &selectorTestWriteback{}, logger.NOP(), UDPNatOptions{Timeout: time.Minute}, time.Minute)
+					d := NewForwardDispatcher(&selectorTestHandler{port: port}, &selectorTestWriteback{}, logger.NOP(), 0, UDPNatOptions{Timeout: time.Minute}, time.Minute)
 					t.Cleanup(d.Close)
 					firstStage, secondStage := selectorTestStage(d), selectorTestStage(d)
 					firstPacket := selectorTestPacket(source)

@@ -87,7 +87,7 @@ func TestLocalICMPEchoBeforeFlowRouting(t *testing.T) {
 					}
 					raw := packet(source, test.destination)
 					handler := &localICMPTestHandler{}
-					dispatcher := NewForwardDispatcher(handler, nil, nil, UDPNatOptions{}, 0)
+					dispatcher := NewForwardDispatcher(handler, nil, nil, 0, UDPNatOptions{}, 0)
 					defer dispatcher.Close()
 					stackOptions := StackOptions{TunOptions: options, Handler: handler}
 					var replied bool
